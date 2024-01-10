@@ -15,15 +15,15 @@ go get github.com/darmawan01/ws-wrapper
 ## Register websocket wrapper handler
 
 ```go
-    engine := gin.Default()
+engine := gin.Default()
 
-	router := engine.Group("/api")
+router := engine.Group("/api")
 
-	/* Register websocket route */
-	router.GET("/ws", func(ctx *gin.Context) {
-		/* Websocket wrapper handler */
-		ws.WebsocketHandler(ctx.Writer, ctx.Request)
-	})
+/* Register websocket route */
+router.GET("/ws", func(ctx *gin.Context) {
+    /* Websocket wrapper handler */
+    ws.WebsocketHandler(ctx.Writer, ctx.Request)
+})
 ```
 
 ### Registering your method handler
