@@ -1,6 +1,8 @@
 package ws
 
 import (
+	"context"
+	"log"
 	"sync"
 
 	"github.com/gorilla/websocket"
@@ -10,19 +12,20 @@ type Client struct {
 	*websocket.Conn
 	mu sync.Mutex
 
-	send chan ResponseMessage
-	id   uint64
+	send    chan ResponseMessage
+	onClose func()
+	Context ClientContext
 }
 
-func NewClient(c *websocket.Conn) *Client {
-
-	conn := &Client{
-		Conn: c,
+func NewClient(conn *websocket.Conn) *Client {
+	return &Client{
+		Conn: conn,
 		mu:   sync.Mutex{},
 		send: make(chan ResponseMessage),
+		Context: ClientContext{
+			Context: context.Background(),
+		},
 	}
-
-	return conn
 }
 
 func (c *Client) Send(message ResponseMessage) {
@@ -30,11 +33,21 @@ func (c *Client) Send(message ResponseMessage) {
 	defer c.mu.Unlock()
 
 	message.JSONRPC = JSONRPC
-	message.ID = c.id
+	message.ID = c.Context.GetId()
 
 	c.send <- message
 }
 
 func (c *Client) closeConnection() {
+	log.Printf("Connection closed :: %d", c.Context.GetId())
+
+	if c.onClose != nil {
+		c.onClose()
+	}
+
 	c.Close()
+}
+
+func (c *Client) OnClose(fn func()) {
+	c.onClose = fn
 }

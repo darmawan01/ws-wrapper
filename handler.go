@@ -2,8 +2,6 @@ package ws
 
 import (
 	"encoding/json"
-	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -12,9 +10,10 @@ import (
 )
 
 const (
-	writeWait  = 60 * time.Second
-	pongWait   = 60 * time.Second
-	pingPeriod = (pongWait * 9) / 10
+	writeWait      = 10 * time.Second
+	pongWait       = 60 * time.Second
+	pingPeriod     = (pongWait * 9) / 10
+	maxMessageSize = 512
 )
 
 var upgrader = websocket.Upgrader{
@@ -25,69 +24,63 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
-var socketChannels map[string]func(RequestMessage, *Client)
+var channels map[string]func(RequestMessage, *Client)
 
 func WebsocketHandler(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Println("error upgrading connection")
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(err.Error()))
+		log.Print("Error during connection upgrade :: ", err.Error())
 
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("Internal Server Error"))
 		return
 	}
 
 	con := NewClient(conn)
 	con.SetCloseHandler(closeHandler(con))
 
-	go requestHandler(con)
-	go responseHandler(con)
+	go readPump(con)
+	go writePump(con)
 }
 
-func RegisterChannelHandler(channel string, fn func(RequestMessage, *Client)) error {
+func RegisterChannelHandler(channel string, fn func(RequestMessage, *Client)) {
 	if channel == "" {
-		return errors.New("channel can not be an empty string")
+		log.Fatal("channel can not be an empty string")
 	}
 
 	if fn == nil {
-		return errors.New("handler should not be nil")
+		log.Fatal("handler should not be nil")
 	}
 
-	ch := getChannels()
+	ch := GetChannels()
 	if ch[channel] != nil {
-		return fmt.Errorf("channel already registered")
+		log.Fatal("channel already registered")
 	}
 
 	ch[channel] = fn
-
-	return nil
 }
 
-func getChannels() map[string]func(RequestMessage, *Client) {
-	if socketChannels == nil {
-		socketChannels = make(map[string]func(RequestMessage, *Client))
+func GetChannels() map[string]func(RequestMessage, *Client) {
+	if channels == nil {
+		channels = make(map[string]func(RequestMessage, *Client))
 	}
 
-	return socketChannels
+	return channels
 }
 
-func requestHandler(c *Client) {
+func readPump(c *Client) {
 	defer func() {
-		log.Println("closing connection")
-
 		c.closeConnection()
 	}()
 
+	c.SetReadLimit(maxMessageSize)
 	c.SetReadDeadline(time.Now().Add(pongWait))
-	c.SetPongHandler(func(string) error {
-		c.SetReadDeadline(time.Now().Add(pongWait))
-		return nil
-	})
+	c.SetPongHandler(func(string) error { c.SetReadDeadline(time.Now().Add(pongWait)); return nil })
 
 	for {
 		msgType, payload, err := c.ReadMessage()
 		if err != nil {
-			log.Println(err)
+			log.Println("Error reading message :: ", err.Error())
 
 			c.Send(ResponseMessage{
 				Error: &ErrorMessage{
@@ -119,7 +112,7 @@ func requestHandler(c *Client) {
 			msg := RequestMessage{}
 
 			if err := json.Unmarshal(payload, &msg); err != nil {
-				log.Println(err)
+				log.Println("Error reading message :: ", err.Error())
 
 				c.Send(ResponseMessage{
 					Error: &ErrorMessage{
@@ -132,15 +125,7 @@ func requestHandler(c *Client) {
 				return
 			}
 
-			if socketChannels[msg.Method] == nil {
-				c.Send(ResponseMessage{
-					Error: &ErrorMessage{
-						Message: "method not found",
-						Data:    nil,
-						Code:    MethodNotFound,
-					},
-				})
-			} else if msg.ID == nil {
+			if msg.ID == nil {
 				c.Send(ResponseMessage{
 					Error: &ErrorMessage{
 						Message: "id should not be empty",
@@ -148,20 +133,31 @@ func requestHandler(c *Client) {
 						Code:    InvalidRequest,
 					},
 				})
-			} else {
-				c.id = *msg.ID
-
-				go socketChannels[msg.Method](msg, c)
 			}
+
+			handler, ok := channels[msg.Method]
+			if !ok {
+				c.Send(ResponseMessage{
+					Error: &ErrorMessage{
+						Message: "method not found",
+						Data:    nil,
+						Code:    MethodNotFound,
+					},
+				})
+			} else {
+				go handler(msg, c)
+			}
+
 		}
 
 	}
 }
 
-func responseHandler(c *Client) {
+func writePump(c *Client) {
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
 		ticker.Stop()
+
 		c.closeConnection()
 	}()
 
@@ -171,7 +167,7 @@ func responseHandler(c *Client) {
 			c.SetWriteDeadline(time.Now().Add(writeWait))
 
 			if err := c.WriteMessage(websocket.PingMessage, nil); err != nil {
-				log.Println(err)
+				log.Println("Error writing message :: ", err.Error())
 
 				c.Send(ResponseMessage{
 					Error: &ErrorMessage{
@@ -191,8 +187,7 @@ func responseHandler(c *Client) {
 			}
 
 			if err := c.WriteJSON(m); err != nil {
-				log.Println(err)
-
+				log.Println("Error writing message :: ", err.Error())
 				c.Send(ResponseMessage{
 					Error: &ErrorMessage{
 						Message: "something went wrong",
@@ -207,7 +202,7 @@ func responseHandler(c *Client) {
 }
 
 func closeHandler(c *Client) func(code int, text string) error {
-	return func(code int, text string) error {
+	return func(int, string) error {
 		c.closeConnection()
 		return nil
 	}
